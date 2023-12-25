@@ -76,7 +76,9 @@ def setup_render_resources(width, height, fragment_source: str):
 
     fbo, texture = setup_framebuffer(width, height)
 
-    return (fbo, shader, vao)
+    textures = gl.glGenTextures(4)
+
+    return (fbo, shader, vao, textures)
 
 def render_resources_cleanup():
     # assume all other resources get cleaned up here
@@ -109,6 +111,11 @@ uniform float	iTime;
 uniform float	iTimeDelta;
 uniform float	iFrameRate;
 uniform int	    iFrame;
+
+uniform sampler2D   iChannel0;
+uniform sampler2D   iChannel1;
+uniform sampler2D   iChannel2;
+uniform sampler2D   iChannel3;
 
 #define texture2D texture
 
@@ -153,6 +160,24 @@ def shadertoy_vars_update(shader, width, height, time, time_delta, frame_rate, f
     iFrame_location = gl.glGetUniformLocation(shader, "iFrame")
     gl.glUniform1i(iFrame_location, frame)
 
+def shadertoy_texture_update(texture, image, frame):
+    if len(image.shape) == 4:
+        image = image[frame]
+    image = image.cpu().numpy()
+    image = image[::-1, :, :]
+    gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
+    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, image.shape[1], image.shape[0], 0, gl.GL_RGB, gl.GL_FLOAT, image)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+
+def shadertoy_texture_bind(shader, textures):
+    gl.glUseProgram(shader)
+    for i in range(4):
+        gl.glActiveTexture(gl.GL_TEXTURE0 + i) # type: ignore
+        gl.glBindTexture(gl.GL_TEXTURE_2D, textures[i])
+        iChannel_location = gl.glGetUniformLocation(shader, f"iChannel{i}")
+        gl.glUniform1i(iChannel_location, i)
+
 class Shadertoy:
     @classmethod
     def INPUT_TYPES(s):
@@ -160,24 +185,29 @@ class Shadertoy:
                               "height": ("INT", {"default": 512, "min": 64, "max": comfy_nodes.MAX_RESOLUTION, "step": 8}),
                               "frame_count": ("INT", {"default": 1, "min": 1, "max": 262144}),
                               "fps": ("INT", {"default": 1, "min": 1, "max": 120}),
-                              "source": ("STRING", {"default": SHADERTOY_DEFAULT, "multiline": True, "dynamicPrompts": False})}}
+                              "source": ("STRING", {"default": SHADERTOY_DEFAULT, "multiline": True, "dynamicPrompts": False})},
+                "optional": { "channel_0": ("IMAGE",),
+                              "channel_1": ("IMAGE",)}}
     
     RETURN_TYPES = ("IMAGE", )
     CATEGORY = "Audio Reactor"
     FUNCTION = "render"
 
-    def render(self, width: int, height: int, frame_count: int, fps: int, source: str):
+    def render(self, width: int, height: int, frame_count: int, fps: int, source: str, 
+               channel_0: torch.Tensor|None=None, channel_1: torch.Tensor|None=None):
         fragment_source = SHADERTOY_HEADER
         fragment_source += source
         fragment_source += SHADERTOY_FOOTER
-        print(fragment_source)
 
-        fbo, shader, vao = setup_render_resources(width, height, fragment_source)
+        fbo, shader, vao, textures = setup_render_resources(width, height, fragment_source)
 
         images = []
         frame = 0
         for _ in range(frame_count):
             shadertoy_vars_update(shader, width, height, frame * (1.0 / fps), (1.0 / fps), fps, frame)
+            if channel_0 != None: shadertoy_texture_update(textures[0], channel_0, frame)
+            if channel_1 != None: shadertoy_texture_update(textures[1], channel_1, frame)
+            shadertoy_texture_bind(shader, textures)
 
             image = render(width, height, fbo, shader, vao)
             image = torch.from_numpy(image)[None,]
