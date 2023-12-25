@@ -51,46 +51,30 @@ def setup_render_resources(width, height, fragment_source: str):
 
     vertex_source = """
     #version 330 core
-    layout (location = 0) in vec2 aPos;
     void main()
     {
-        gl_Position = vec4(aPos, 0.0, 1.0);
+        vec2 verts[3] = vec2[](vec2(-1, -1), vec2(3, -1), vec2(-1, 3));
+        gl_Position = vec4(verts[gl_VertexID], 0, 1);
     }
     """
     shader = compile_program(vertex_source, fragment_source)
-
-    vertices = np.array([
-        -1.0, -1.0,
-         3.0, -1.0,
-        -1.0,  3.0
-    ], dtype=np.float32)
-    vao = gl.glGenVertexArrays(1)
-    vbo = gl.glGenBuffers(1)
-    gl.glBindVertexArray(vao)
-    gl.glBindBuffer(gl.GL_ARRAY_BUFFER, vbo)
-    gl.glBufferData(gl.GL_ARRAY_BUFFER, vertices.nbytes, vertices, gl.GL_STATIC_DRAW)
-    gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
-    gl.glEnableVertexAttribArray(0)
-    gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
-    gl.glBindVertexArray(0)
 
     fbo, texture = setup_framebuffer(width, height)
 
     textures = gl.glGenTextures(4)
 
-    return (fbo, shader, vao, textures)
+    return (fbo, shader, textures)
 
 def render_resources_cleanup():
     # assume all other resources get cleaned up here
     glfw.terminate()
 
-def render(width, height, fbo, shader, vao):
+def render(width, height, fbo, shader):
     gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fbo)
     gl.glClearColor(0.0, 0.0, 0.0, 1.0)
     gl.glClear(gl.GL_COLOR_BUFFER_BIT)
 
     gl.glUseProgram(shader)
-    gl.glBindVertexArray(vao)
     gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
 
     data = gl.glReadPixels(0, 0, width, height, gl.GL_RGB, gl.GL_UNSIGNED_BYTE)
@@ -187,19 +171,22 @@ class Shadertoy:
                               "fps": ("INT", {"default": 1, "min": 1, "max": 120}),
                               "source": ("STRING", {"default": SHADERTOY_DEFAULT, "multiline": True, "dynamicPrompts": False})},
                 "optional": { "channel_0": ("IMAGE",),
-                              "channel_1": ("IMAGE",)}}
+                              "channel_1": ("IMAGE",),
+                              "channel_2": ("IMAGE",),
+                              "channel_3": ("IMAGE",)}}
     
     RETURN_TYPES = ("IMAGE", )
     CATEGORY = "Audio Reactor"
     FUNCTION = "render"
 
     def render(self, width: int, height: int, frame_count: int, fps: int, source: str, 
-               channel_0: torch.Tensor|None=None, channel_1: torch.Tensor|None=None):
+               channel_0: torch.Tensor|None=None, channel_1: torch.Tensor|None=None,
+               channel_2: torch.Tensor|None=None, channel_3: torch.Tensor|None=None):
         fragment_source = SHADERTOY_HEADER
         fragment_source += source
         fragment_source += SHADERTOY_FOOTER
 
-        fbo, shader, vao, textures = setup_render_resources(width, height, fragment_source)
+        fbo, shader, textures = setup_render_resources(width, height, fragment_source)
 
         images = []
         frame = 0
@@ -207,9 +194,11 @@ class Shadertoy:
             shadertoy_vars_update(shader, width, height, frame * (1.0 / fps), (1.0 / fps), fps, frame)
             if channel_0 != None: shadertoy_texture_update(textures[0], channel_0, frame)
             if channel_1 != None: shadertoy_texture_update(textures[1], channel_1, frame)
+            if channel_2 != None: shadertoy_texture_update(textures[2], channel_2, frame)
+            if channel_3 != None: shadertoy_texture_update(textures[3], channel_3, frame)
             shadertoy_texture_bind(shader, textures)
 
-            image = render(width, height, fbo, shader, vao)
+            image = render(width, height, fbo, shader)
             image = torch.from_numpy(image)[None,]
             images.append(image)
 
