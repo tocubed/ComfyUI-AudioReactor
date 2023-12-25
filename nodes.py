@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import librosa
 import OpenGL.GL as gl
 import glfw
 import nodes as comfy_nodes
@@ -208,9 +209,73 @@ class Shadertoy:
 
         return (torch.cat(images, dim=0),)
 
+class AudioLoadPath:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "path": ("STRING", {"default": "X://insert/path/here.mp4"}),
+                              "sample_rate": ("INT", {"default": 22050, "min": 6000, "max": 192000, "step": 1}),
+                              "offset": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1e6, "step": 0.001}),
+                              "duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1e6, "step": 0.001})}}
+    
+    RETURN_TYPES = ("AUDIO", )
+    CATEGORY = "Audio Reactor"
+    FUNCTION = "load"
+
+    def load(self, path: str, sample_rate: int, offset: float, duration: float|None):
+        if duration == 0.0: duration = None
+        audio, _ = librosa.load(path, sr=sample_rate, offset=offset, duration=duration)
+        audio = torch.from_numpy(audio)[None,:,None]
+        return (audio,)
+
+class AudioFrameTransformShadertoy:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "audio": ("AUDIO",),
+                              "sample_rate": ("INT", {"default": 22050, "min": 6000, "max": 192000, "step": 1}),
+                              "frame_count": ("INT", {"default": 1, "min": 1, "max": 262144}),
+                              "fps": ("INT", {"default": 1, "min": 1, "max": 120})}}
+
+    RETURN_TYPES = ("IMAGE", )
+    CATEGORY = "Audio Reactor"
+    FUNCTION = "transform"
+
+    def transform(self, audio: torch.Tensor, sample_rate: int, frame_count: int, fps: int):
+        timestamps = np.arange(0, frame_count) * (1 / fps)
+        frame_idxs = librosa.time_to_frames(timestamps, sr=48000, hop_length=512)
+
+        samples = audio.cpu().numpy()[0, :, 0]
+        samples = librosa.resample(samples, orig_sr=sample_rate, target_sr=48000)
+
+        # referencing https://gist.github.com/soulthreads/2efe50da4be1fb5f7ab60ff14ca434b8
+
+        # windows
+        frames = librosa.util.frame(samples, frame_length=2048, hop_length=512, axis=0)
+        frames = frames[frame_idxs, :]
+        fft_frames = np.fft.rfft(frames, axis=1)
+        fft_frames = np.abs(fft_frames) / 2048
+        fft_smoothed = np.zeros_like(fft_frames)
+        fft_smoothed[0] = 0.2 * fft_frames[0]
+        for i in range(1, fft_frames.shape[0]): fft_smoothed[i] = 0.8 * fft_smoothed[i - 1] + (1 - 0.8) * fft_frames[i]
+        fft_frames = 20 * np.log10(fft_smoothed) # type: ignore
+
+        # conversion
+        frames = np.clip(0.5 * (1 + frames), 0, 1) # type: ignore
+        fft_min = -100
+        fft_max = -30
+        fft_frames = np.divide(fft_frames - fft_min, fft_max - fft_min, out=np.zeros_like(fft_frames), where=fft_max!=fft_min) # type: ignore
+        fft_frames = np.clip(fft_frames, 0, 1) # type: ignore
+
+        frames = torch.from_numpy(frames[:, :512]).unsqueeze(-1).expand(-1, -1, 3)
+        fft_frames = torch.from_numpy(fft_frames[:, :512]).unsqueeze(-1).expand(-1, -1, 3)
+        return (torch.cat([frames.unsqueeze(1), fft_frames.unsqueeze(1)], dim=1),)
+
 NODE_CLASS_MAPPINGS = {
     "Shadertoy": Shadertoy,
+    "AudioLoadPath": AudioLoadPath,
+    "AudioFrameTransformShadertoy": AudioFrameTransformShadertoy,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Shadertoy": "Shadertoy",
+    "AudioLoadPath": "Load Audio (from Path)",
+    "AudioFrameTransformShadertoy": "Audio Frame Transform (Shadertoy)",
 }
