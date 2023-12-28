@@ -154,6 +154,8 @@ def shadertoy_texture_update(texture, image, frame):
     gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, image.shape[1], image.shape[0], 0, gl.GL_RGB, gl.GL_FLOAT, image)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
 
 def shadertoy_texture_bind(shader, textures):
     gl.glUseProgram(shader)
@@ -250,7 +252,8 @@ class AudioFrameTransformShadertoy:
 
         # windows
         frames = librosa.util.frame(samples, frame_length=2048, hop_length=512, axis=0)
-        frames = frames[frame_idxs, :]
+        blackman = librosa.filters.get_window("blackman", 2048)
+        frames = frames[frame_idxs, :] * blackman[None,]
         fft_frames = np.fft.rfft(frames, axis=1)
         fft_frames = np.abs(fft_frames) / 2048
         fft_smoothed = np.zeros_like(fft_frames)
