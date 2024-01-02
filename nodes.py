@@ -243,22 +243,21 @@ class AudioFrameTransformShadertoy:
 
     def transform(self, audio: torch.Tensor, sample_rate: int, frame_count: int, fps: int):
         timestamps = np.arange(0, frame_count) * (1 / fps)
-        frame_idxs = librosa.time_to_frames(timestamps, sr=48000, hop_length=512)
 
         samples = audio.cpu().numpy()[0, :, 0]
         samples = librosa.resample(samples, orig_sr=sample_rate, target_sr=48000)
 
         # referencing https://gist.github.com/soulthreads/2efe50da4be1fb5f7ab60ff14ca434b8
-
-        # windows
-        frames = librosa.util.frame(samples, frame_length=2048, hop_length=512, axis=0)
-        blackman = librosa.filters.get_window("blackman", 2048)
-        frames = frames[frame_idxs, :] * blackman[None,]
-        fft_frames = np.fft.rfft(frames, axis=1)
+        # frames and smoothed fft
+        frame_idxs = librosa.time_to_frames(timestamps, sr=48000, hop_length=512)
+        frames = librosa.util.frame(samples, frame_length=2048, hop_length=512, axis=0)[frame_idxs, :]
+        blackman = librosa.filters.get_window("blackman", 2048, fftbins=True)
+        fft_frames = np.fft.rfft(frames * blackman[None,], axis=1)
         fft_frames = np.abs(fft_frames) / 2048
         fft_smoothed = np.zeros_like(fft_frames)
-        fft_smoothed[0] = 0.2 * fft_frames[0]
-        for i in range(1, fft_frames.shape[0]): fft_smoothed[i] = 0.8 * fft_smoothed[i - 1] + (1 - 0.8) * fft_frames[i]
+        k_factor = 0.8 ** (60 / fps)
+        fft_smoothed[0] = (1 - k_factor) * fft_frames[0]
+        for i in range(1, fft_frames.shape[0]): fft_smoothed[i] = k_factor * fft_smoothed[i - 1] + (1 - k_factor) * fft_frames[i]
         fft_frames = 20 * np.log10(fft_smoothed) # type: ignore
 
         # conversion
@@ -272,13 +271,46 @@ class AudioFrameTransformShadertoy:
         fft_frames = torch.from_numpy(fft_frames[:, :512]).unsqueeze(-1).expand(-1, -1, 3)
         return (torch.cat([frames.unsqueeze(1), fft_frames.unsqueeze(1)], dim=1),)
 
+class AudioFrameTransformBeats:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "audio": ("AUDIO",),
+                              "sample_rate": ("INT", {"default": 22050, "min": 6000, "max": 192000, "step": 1}),
+                              "frame_count": ("INT", {"default": 1, "min": 1, "max": 262144}),
+                              "fps": ("INT", {"default": 1, "min": 1, "max": 120})}}
+
+    RETURN_TYPES = ("IMAGE", )
+    CATEGORY = "Audio Reactor"
+    FUNCTION = "transform"
+
+    def transform(self, audio: torch.Tensor, sample_rate: int, frame_count: int, fps: int):
+        timestamps = np.arange(0, frame_count) * (1 / fps)
+
+        samples = audio.cpu().numpy()[0, :, 0]
+        tempo, beats = librosa.beat.beat_track(y=samples, sr=sample_rate, hop_length=512)
+
+        beat_timestamps = librosa.frames_to_time(beats, sr=sample_rate, hop_length=512)
+        matches = librosa.util.match_events(beat_timestamps, timestamps)
+
+        beats = np.isin(np.arange(frame_count), matches).astype(np.float32) # type: ignore
+
+        beats_smoothed = np.zeros_like(beats)
+        k_factor = 0.8 ** (60 / fps)
+        beats_smoothed[0] = beats[0]
+        for i in range(1, beats.shape[0]): beats_smoothed[i] = max(k_factor * beats_smoothed[i - 1], beats[i])
+
+        return (torch.from_numpy(beats_smoothed)[:, None, None, None].expand(-1, -1, -1, 3),)
+
+
 NODE_CLASS_MAPPINGS = {
     "Shadertoy": Shadertoy,
     "AudioLoadPath": AudioLoadPath,
     "AudioFrameTransformShadertoy": AudioFrameTransformShadertoy,
+    "AudioFrameTransformBeats": AudioFrameTransformBeats,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Shadertoy": "Shadertoy",
     "AudioLoadPath": "Load Audio (from Path)",
     "AudioFrameTransformShadertoy": "Audio Frame Transform (Shadertoy)",
+    "AudioFrameTransformBeats": "Audio Frame Transform (Beats)",
 }
