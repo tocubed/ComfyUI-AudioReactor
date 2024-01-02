@@ -1,9 +1,81 @@
 import numpy as np
 import torch
 import librosa
-import OpenGL.GL as gl
-import glfw
 import nodes as comfy_nodes
+
+import os
+headless = os.name == "posix" and os.environ.get("DISPLAY", "") == ""
+
+if headless:
+    os.environ["PYOPENGL_PLATFORM"] = "egl"
+    import OpenGL.EGL as egl
+    import OpenGL.GL as gl
+
+    def render_surface_and_context_init(width, height): # type: ignore
+        egl_display = egl.eglGetDisplay(egl.EGL_DEFAULT_DISPLAY)
+        if egl_display == egl.EGL_NO_DISPLAY:
+            raise RuntimeError("No EGL display connection available")
+        if not egl.eglInitialize(egl_display, None, None):
+            raise RuntimeError("Unable to initialize EGL")
+
+        config_attribs = [
+             egl.EGL_SURFACE_TYPE, egl.EGL_PBUFFER_BIT,
+             egl.EGL_BLUE_SIZE, 8,
+             egl.EGL_GREEN_SIZE, 8,
+             egl.EGL_RED_SIZE, 8,
+             egl.EGL_DEPTH_SIZE, 24,
+             egl.EGL_RENDERABLE_TYPE, egl.EGL_OPENGL_BIT,
+             egl.EGL_NONE
+        ]
+        num_configs = egl.EGLint()
+        if not egl.eglChooseConfig(egl_display, config_attribs, None, 0, num_configs) or num_configs.value == 0:
+            raise RuntimeError("No suitable EGL configuration was found")
+        
+        egl_config = (egl.EGLConfig * num_configs.value)()
+        egl.eglChooseConfig(egl_display, config_attribs, egl_config, 1, num_configs)
+        egl_config = egl_config[0]
+
+        egl_context = egl.eglCreateContext(egl_display, egl_config, egl.EGL_NO_CONTEXT, None)
+        if egl_context == egl.EGL_NO_CONTEXT:
+            raise RuntimeError("Unable to create EGL context")
+
+        pbuffer_attribs = [
+             egl.EGL_WIDTH, width,
+             egl.EGL_HEIGHT, height,
+             egl.EGL_NONE
+        ]
+        egl_surface = egl.eglCreatePbufferSurface(egl_display, egl_config, pbuffer_attribs)
+        if egl_surface == egl.EGL_NO_SURFACE:
+            raise RuntimeError("Unable to create offscreen EGL surface")
+
+        if not egl.eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context):
+            raise RuntimeError("Unable to make EGL context current")
+
+        return {"egl_display": egl_display, "egl_surface": egl_surface, "egl_context": egl_context}
+    
+    def render_surface_and_context_deinit(egl_display, egl_surface, egl_context): # type: ignore
+        egl.eglMakeCurrent(egl_display, egl.EGL_NO_SURFACE, egl.EGL_NO_SURFACE, egl.EGL_NO_CONTEXT)
+        egl.eglDestroySurface(egl_display, egl_surface)
+        egl.eglDestroyContext(egl_display, egl_context)
+        egl.eglTerminate(egl_display)
+else:
+    import OpenGL.GL as gl
+    import glfw
+
+    def render_surface_and_context_init(width, height):
+        if not glfw.init():
+            raise RuntimeError("GLFW did not init")
+
+        glfw.window_hint(glfw.VISIBLE, glfw.FALSE)  # hidden
+        window = glfw.create_window(width, height, "hidden", None, None)
+        if not window:
+            raise RuntimeError("GLFW did not init window")
+
+        glfw.make_context_current(window)
+        return {}
+    
+    def render_surface_and_context_deinit(**kwargs):
+        glfw.terminate()
 
 def compile_shader(source, shader_type):
     shader = gl.glCreateShader(shader_type)
@@ -40,15 +112,7 @@ def setup_framebuffer(width, height):
     return fbo, texture
 
 def setup_render_resources(width, height, fragment_source: str):
-    if not glfw.init():
-        raise RuntimeError("GLFW did not init")
-
-    glfw.window_hint(glfw.VISIBLE, glfw.FALSE)  # hidden
-    window = glfw.create_window(width, height, "hidden", None, None)
-    if not window:
-        raise RuntimeError("GLFW did not init window")
-
-    glfw.make_context_current(window)
+    ctx = render_surface_and_context_init(width, height)
 
     vertex_source = """
     #version 330 core
@@ -64,11 +128,11 @@ def setup_render_resources(width, height, fragment_source: str):
 
     textures = gl.glGenTextures(4)
 
-    return (fbo, shader, textures)
+    return (ctx, fbo, shader, textures)
 
-def render_resources_cleanup():
-    # assume all other resources get cleaned up here
-    glfw.terminate()
+def render_resources_cleanup(ctx):
+    # assume all other resources get cleaned up with the context
+    render_surface_and_context_deinit(**ctx)
 
 def render(width, height, fbo, shader):
     gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fbo)
@@ -189,7 +253,7 @@ class Shadertoy:
         fragment_source += source
         fragment_source += SHADERTOY_FOOTER
 
-        fbo, shader, textures = setup_render_resources(width, height, fragment_source)
+        ctx, fbo, shader, textures = setup_render_resources(width, height, fragment_source)
 
         images = []
         frame = 0
@@ -207,7 +271,7 @@ class Shadertoy:
 
             frame += 1
         
-        render_resources_cleanup()
+        render_resources_cleanup(ctx)
 
         return (torch.cat(images, dim=0),)
 
